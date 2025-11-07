@@ -1,0 +1,15 @@
+*.o
+*.a
+*.elf
+*.hex
+*.bin
+*.map
+.DS_Store
+.vscode/
+.pio/
+.pioenvs/
+.piolibdeps/
+.clang_complete
+.gcc-flags.json
+*.swp
+*~

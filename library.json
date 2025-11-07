@@ -1,0 +1,21 @@
+{
+  "name": "RA8875_Minimal",
+  "version": "1.0.0",
+  "description": "Lightweight RA8875 display driver optimized for LVGL with FT5206 touch support",
+  "keywords": "RA8875, display, TFT, LVGL, FT5206, touch, capacitive, SPI, graphics",
+  "authors": [
+    {
+      "name": "fubr",
+      "maintainer": true
+    }
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fubr/RA8875_Minimal.git"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/fubr/RA8875_Minimal",
+  "frameworks": "arduino",
+  "platforms": "*",
+  "headers": "RA8875_Minimal.h"
+}
