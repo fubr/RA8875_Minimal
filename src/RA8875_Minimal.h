@@ -39,6 +39,11 @@ private:
     volatile bool _touchDetected;
     TwoWire* _wire;
     
+    // Touch state caching
+    bool _lastTouchState = false;
+    uint8_t _currentTouches = 0;     // Current number of touches
+    uint16_t _cachedCoords[2][2]; // Cache coordinates for getTScoordinates()
+    
     // Basic SPI communication
     void writeCommand(uint8_t cmd);
     void writeData(uint8_t data);

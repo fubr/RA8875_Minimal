@@ -71,8 +71,15 @@ RA8875_Minimal::RA8875_Minimal(uint8_t cs, uint8_t rst) : _cs(cs), _rst(rst) {
     _width = 0;
     _height = 0;
     _wire = &Wire;  // Default to Wire, can be changed to Wire1, Wire2, etc.
+    _lastTouchState = false;
+    _currentTouches = 0;
+    
+    // Initialize cached coordinates
+    _cachedCoords[0][0] = 0;
+    _cachedCoords[0][1] = 0;
+    _cachedCoords[1][0] = 0;
+    _cachedCoords[1][1] = 0;
 }
-
 bool RA8875_Minimal::begin(uint16_t displayType) {
     pinMode(_cs, OUTPUT);
     digitalWrite(_cs, HIGH);
@@ -311,34 +318,74 @@ void RA8875_Minimal::touchInit() {
 }
 
 bool RA8875_Minimal::touched() {
+    // Check if there's a touch AND update coordinates if so
+    // Add hysteresis to prevent flickering touch detection
+    
+    static bool lastTouchState = false;
+    static uint32_t lastTouchTime = 0;
+    static uint32_t lastReleaseTime = 0;
+    const uint32_t TOUCH_HOLD_TIME = 50;    // Hold "touched" state for 50ms after detection
+    const uint32_t RELEASE_HOLD_TIME = 100; // Hold "released" state for 100ms after release
+    
+    uint32_t now = millis();
+    bool isTouched = false;
+    
     if (_intPin != 255) {
-        // If interrupt pin is configured, use it (active low)
-        return !digitalRead(_intPin);
+        // If using interrupt pin, check the pin state
+        // The FT5206 INT pin is LOW when touched
+        isTouched = (digitalRead(_intPin) == LOW);
+    } else {
+        // Fallback: Poll FT5206 touch count register
+        _wire->beginTransmission(FT5206_ADDR);
+        _wire->write(0x02);  // Touch count register
+        _wire->endTransmission(false);
+        
+        _wire->requestFrom(FT5206_ADDR, 1);
+        uint8_t touchCount = 0;
+        if (_wire->available()) {
+            touchCount = _wire->read() & 0x0F;
+        }
+        
+        isTouched = (touchCount > 0);
     }
     
-    // Poll the FT5206 for touch points
-    _wire->beginTransmission(FT5206_ADDR);
-    _wire->write(0x02);  // Read register 0x02 (TD_STATUS - number of touch points)
-    _wire->endTransmission(false);
-    
-    _wire->requestFrom(FT5206_ADDR, 1);
-    if (_wire->available()) {
-        uint8_t touches = _wire->read() & 0x0F;
-        return (touches > 0);
+    // Apply hysteresis to prevent flickering
+    if (isTouched) {
+        lastTouchTime = now;
+        lastTouchState = true;
+        updateTS();  // Update cached coordinates
+        return true;
+    } else {
+        // No touch detected by hardware
+        if (lastTouchState) {
+            // Was touched before, check if we should hold the state
+            if ((now - lastTouchTime) < TOUCH_HOLD_TIME) {
+                // Still within hold period, report as touched
+                return true;
+            } else {
+                // Touch hold period expired
+                lastTouchState = false;
+                lastReleaseTime = now;
+                return false;
+            }
+        } else {
+            // Was already released, check release hold time
+            if ((now - lastReleaseTime) < RELEASE_HOLD_TIME) {
+                // Don't allow new touch during release hold period
+                return false;
+            }
+            return false;
+        }
     }
-    
-    return false;
 }
 
 void RA8875_Minimal::updateTS() {
-    // For FT5206, we don't need to clear flags manually
-    // Reading the touch data clears the interrupt
-}
-
-void RA8875_Minimal::getTScoordinates(uint16_t coords[2][2]) {
-    // Read touch data from FT5206
+    // This function reads the touch data from FT5206
+    // It should be called AFTER touched() returns true
+    
+    // Read all registers at once (0x00 to 0x0F)
     _wire->beginTransmission(FT5206_ADDR);
-    _wire->write(0x00);  // Start at register 0
+    _wire->write(0x00);
     _wire->endTransmission(false);
     
     uint8_t data[16];
@@ -348,28 +395,60 @@ void RA8875_Minimal::getTScoordinates(uint16_t coords[2][2]) {
         data[i] = _wire->read();
     }
     
-    // Parse first touch point (registers 0x03-0x08)
-    // FT5206 format:
-    // 0x03: XH (bits 0-3 = X[11:8], bits 6-7 = event flag)
-    // 0x04: XL (X[7:0])
-    // 0x05: YH (bits 0-3 = Y[11:8])
-    // 0x06: YL (Y[7:0])
+    // Store the touch count
+    _currentTouches = data[0x02] & 0x0F;
     
-    uint16_t x = ((data[0x03] & 0x0F) << 8) | data[0x04];
-    uint16_t y = ((data[0x05] & 0x0F) << 8) | data[0x06];
-    
-    // Apply rotation to touch coordinates to match display rotation
-    if (_rotation == 0) {
-        coords[0][0] = x;
-        coords[0][1] = y;
-    } else if (_rotation == 2) {  // 180 degree rotation
-        coords[0][0] = _width - 1 - x;
-        coords[0][1] = _height - 1 - y;
+    // Cache the coordinates if there's a touch
+    if (_currentTouches > 0) {
+        // Parse coordinates (registers 0x03-0x06)
+        uint16_t x = ((data[0x03] & 0x0F) << 8) | data[0x04];
+        uint16_t y = ((data[0x05] & 0x0F) << 8) | data[0x06];
+        
+        // Apply rotation
+        uint16_t finalX, finalY;
+        if (_rotation == 0) {
+            finalX = x;
+            finalY = y;
+        } else if (_rotation == 2) {  // 180 degree rotation
+            finalX = _width - 1 - x;
+            finalY = _height - 1 - y;
+        }
+        
+        // Stabilize coordinates to prevent jitter during long press
+        // Only update if moved more than 5 pixels from last position
+        if (_cachedCoords[0][0] == 0 && _cachedCoords[0][1] == 0) {
+            // First touch, just store it
+            _cachedCoords[0][0] = finalX;
+            _cachedCoords[0][1] = finalY;
+        } else {
+            // Check distance from last position
+            int16_t dx = abs((int16_t)finalX - (int16_t)_cachedCoords[0][0]);
+            int16_t dy = abs((int16_t)finalY - (int16_t)_cachedCoords[0][1]);
+            
+            // Only update if moved more than threshold (reduces jitter)
+            if (dx > 5 || dy > 5) {
+                _cachedCoords[0][0] = finalX;
+                _cachedCoords[0][1] = finalY;
+            }
+            // Otherwise keep the old coordinates (stabilizes long press)
+        }
+    } else {
+        // No touch, clear cached coordinates
+        _cachedCoords[0][0] = 0;
+        _cachedCoords[0][1] = 0;
     }
     
-    // Second touch point (optional, for multi-touch)
-    coords[1][0] = 0;
-    coords[1][1] = 0;
+    _cachedCoords[1][0] = 0;
+    _cachedCoords[1][1] = 0;
+}
+
+void RA8875_Minimal::getTScoordinates(uint16_t coords[2][2]) {
+    // Just return the cached coordinates
+    // Don't do any I2C operations here
+    coords[0][0] = _cachedCoords[0][0];
+    coords[0][1] = _cachedCoords[0][1];
+    coords[1][0] = _cachedCoords[1][0];
+    coords[1][1] = _cachedCoords[1][1];
 }
 
 void RA8875_Minimal::useCapINT(uint8_t pin) {
